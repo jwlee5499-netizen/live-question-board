@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { socket, getUserId, getStoredVotes, saveStoredVote } from './utils/socket';
+import React, { useState, useEffect, useRef } from 'react';
+import { socket, getUserId, getStoredVotes, saveStoredVote, setStoredNickname } from './utils/socket';
 import { Question, RoomInfo, ViewMode } from './types';
 import { CreateJoinRoom } from './components/CreateJoinRoom';
 import { AudienceView } from './components/AudienceView';
@@ -12,6 +12,7 @@ export function App() {
   const [viewMode, setViewMode] = useState<ViewMode>('join');
   const [room, setRoom] = useState<RoomInfo | null>(null);
   const [serverIp, setServerIp] = useState<string>('localhost');
+  const [targetRoomParam, setTargetRoomParam] = useState<string | null>(null);
   const [publicUrl, setPublicUrl] = useState<string | null>(() => {
     return localStorage.getItem('qa_custom_public_url') || null;
   });
@@ -22,7 +23,10 @@ export function App() {
   const [isQrOpen, setIsQrOpen] = useState(false);
   const userId = getUserId();
 
-  // 1. 서버 정보(IP 및 터널 URL) 가져오기
+  const currentRoomRef = useRef<RoomInfo | null>(null);
+  currentRoomRef.current = room;
+
+  // 1. 서버 정보 가져오기
   useEffect(() => {
     fetch('/api/server-info')
       .then((res) => res.json())
@@ -37,22 +41,37 @@ export function App() {
     setVotedIds(getStoredVotes());
   }, []);
 
-  // 2. URL 쿼리 파라미터로 자동 입장 처리 (?room=CODE&mode=audience)
+  // 2. URL 쿼리 파라미터 확인 (?room=CODE&mode=audience)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
     const modeParam = params.get('mode') as ViewMode | null;
 
     if (roomParam) {
-      handleJoin(roomParam.toUpperCase(), modeParam || 'audience');
+      setTargetRoomParam(roomParam.toUpperCase());
+      // 만약 스크린 모드나 관리자 모드로 링크가 온 경우 바로 입장
+      if (modeParam === 'screen' || (modeParam === 'admin' && isAdmin)) {
+        handleJoin(roomParam.toUpperCase(), modeParam);
+      }
     }
-  }, []);
+  }, [isAdmin]);
 
-  // 3. Socket 이벤트 등록
+  // 3. Socket 이벤트 등록 및 실시간 동기화 (재연결 시 방 자동 재입장)
   useEffect(() => {
+    const onConnect = () => {
+      console.log('> Socket connected / reconnected');
+      if (currentRoomRef.current) {
+        socket.emit('join_room', { roomId: currentRoomRef.current.id });
+      }
+    };
+
+    socket.on('connect', onConnect);
+
     socket.on('question_added', (newQ: Question) => {
+      console.log('> [Realtime] New question received:', newQ);
       setRoom((prev) => {
         if (!prev) return prev;
+        if (prev.id !== newQ.roomId) return prev;
         if (prev.questions.some((q) => q.id === newQ.id)) return prev;
         return {
           ...prev,
@@ -64,6 +83,7 @@ export function App() {
     socket.on('question_updated', (updatedQ: Question) => {
       setRoom((prev) => {
         if (!prev) return prev;
+        if (prev.id !== updatedQ.roomId) return prev;
         return {
           ...prev,
           questions: prev.questions.map((q) => (q.id === updatedQ.id ? updatedQ : q)),
@@ -85,8 +105,11 @@ export function App() {
       setRoom((prev) => (prev ? { ...prev, questions } : prev));
     });
 
-    socket.on('user_count_updated', ({ userCount }: { userCount: number }) => {
-      setRoom((prev) => (prev ? { ...prev, userCount } : prev));
+    socket.on('user_count_updated', ({ roomId, userCount }: { roomId: string; userCount: number }) => {
+      setRoom((prev) => {
+        if (!prev || prev.id !== roomId) return prev;
+        return { ...prev, userCount };
+      });
     });
 
     socket.on('room_lock_changed', ({ isLocked }: { isLocked: boolean }) => {
@@ -94,6 +117,7 @@ export function App() {
     });
 
     return () => {
+      socket.off('connect', onConnect);
       socket.off('question_added');
       socket.off('question_updated');
       socket.off('question_deleted');
@@ -103,7 +127,7 @@ export function App() {
     };
   }, []);
 
-  // 관리자 로그인 핸들러
+  // 관리자 로그인
   const handleAdminLogin = async (password: string): Promise<boolean> => {
     try {
       const res = await fetch('/api/admin/login', {
@@ -123,13 +147,11 @@ export function App() {
     return false;
   };
 
-  // 관리자 로그아웃
   const handleAdminLogout = () => {
     localStorage.removeItem('qa_admin_token');
     setIsAdmin(false);
   };
 
-  // 접속 URL 커스텀 설정
   const handleUpdateCustomUrl = (url: string) => {
     const trimmed = url.trim();
     if (trimmed) {
@@ -141,8 +163,12 @@ export function App() {
     }
   };
 
-  // 방 입장 핸들러
-  const handleJoin = (roomId: string, mode: ViewMode = 'audience', title?: string) => {
+  // 방 입장 (닉네임 지원)
+  const handleJoin = (roomId: string, mode: ViewMode = 'audience', title?: string, nickname?: string) => {
+    if (nickname) {
+      setStoredNickname(nickname);
+    }
+
     if (mode === 'admin' && title) {
       socket.emit('create_room', { roomId, title }, () => {
         joinRoomActual(roomId, mode);
@@ -164,14 +190,30 @@ export function App() {
     });
   };
 
-  // 질문 등록 (청중)
+  // 질문 등록
   const handleSendQuestion = (author: string, content: string) => {
     if (!room) return;
-    socket.emit('new_question', {
-      roomId: room.id,
-      author,
-      content,
-    });
+    socket.emit(
+      'new_question',
+      {
+        roomId: room.id,
+        author,
+        content,
+      },
+      (res: any) => {
+        if (res && res.success && res.question) {
+          // 등록 즉시 내 화면에 안전 반영 (중복 방지 처리됨)
+          setRoom((prev) => {
+            if (!prev) return prev;
+            if (prev.questions.some((q) => q.id === res.question.id)) return prev;
+            return {
+              ...prev,
+              questions: [res.question, ...prev.questions],
+            };
+          });
+        }
+      }
+    );
   };
 
   // 공감 투표
@@ -193,7 +235,6 @@ export function App() {
     );
   };
 
-  // 관리자 기능들
   const handleToggleHighlight = (questionId: string) => {
     if (!room) return;
     socket.emit('toggle_highlight', { roomId: room.id, questionId });
@@ -219,7 +260,6 @@ export function App() {
     socket.emit('clear_questions', { roomId: room.id });
   };
 
-  // 뷰 모드 변경
   const handleChangeMode = (mode: ViewMode) => {
     setViewMode(mode);
     if (room) {
@@ -228,7 +268,6 @@ export function App() {
     }
   };
 
-  // 방 나가기
   const handleLeave = () => {
     setRoom(null);
     setViewMode('join');
@@ -240,6 +279,7 @@ export function App() {
       {viewMode === 'join' || (!room && viewMode !== 'history') ? (
         <CreateJoinRoom
           isAdmin={isAdmin}
+          targetRoomId={targetRoomParam}
           onAdminLogin={handleAdminLogin}
           onAdminLogout={handleAdminLogout}
           onJoin={handleJoin}

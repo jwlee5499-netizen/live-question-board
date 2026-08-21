@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { RoomInfo } from '../types';
 import { 
   ThumbsUp, 
@@ -14,8 +14,10 @@ import {
   Flame,
   Clock,
   Tv,
-  Settings
+  Settings,
+  User
 } from 'lucide-react';
+import { getStoredNickname, setStoredNickname } from '../utils/socket';
 
 interface AudienceViewProps {
   room: RoomInfo;
@@ -38,26 +40,43 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
   onChangeMode,
   onLeave,
 }) => {
-  const [author, setAuthor] = useState('');
-  const [isAnonymous, setIsAnonymous] = useState(true);
+  const [currentNickname, setCurrentNickname] = useState(() => getStoredNickname() || '익명');
+  const [isAnonymous, setIsAnonymous] = useState(false);
   const [content, setContent] = useState('');
   const [sortBy, setSortBy] = useState<'popular' | 'latest'>('popular');
-  const [filterAnswered, setFilterAnswered] = useState<boolean>(true); // 답변완료도 표시 여부
+  const [filterAnswered, setFilterAnswered] = useState<boolean>(true);
+  const [isEditingNick, setIsEditingNick] = useState(false);
+  const [tempNick, setTempNick] = useState(currentNickname);
+
+  useEffect(() => {
+    const saved = getStoredNickname();
+    if (saved) {
+      setCurrentNickname(saved);
+      setTempNick(saved);
+    }
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!content.trim()) return;
 
-    const finalAuthor = isAnonymous ? '익명' : (author.trim() || '익명');
+    const finalAuthor = isAnonymous ? '익명' : (currentNickname.trim() || '익명');
     onSendQuestion(finalAuthor, content.trim());
     setContent('');
+  };
+
+  const handleSaveNick = (e: React.FormEvent) => {
+    e.preventDefault();
+    const final = tempNick.trim() || '익명';
+    setCurrentNickname(final);
+    setStoredNickname(final);
+    setIsEditingNick(false);
   };
 
   // 정렬 및 필터링
   const filteredQuestions = [...room.questions]
     .filter((q) => !q.isHidden && (filterAnswered ? true : !q.isAnswered))
     .sort((a, b) => {
-      // 강조된 질문 최상단
       if (a.isHighlighted && !b.isHighlighted) return -1;
       if (!a.isHighlighted && b.isHighlighted) return 1;
 
@@ -71,7 +90,7 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
   const answeredCount = room.questions.filter((q) => q.isAnswered).length;
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col pb-32">
+    <div className="min-h-screen bg-slate-50 flex flex-col pb-36">
       {/* Top Navigation Bar */}
       <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-sm">
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
@@ -84,29 +103,28 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
               <ArrowLeft className="w-5 h-5" />
             </button>
             <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h1 className="font-bold text-slate-900 text-sm sm:text-base truncate">
-                  {room.title}
-                </h1>
-                <span className="shrink-0 px-2 py-0.5 bg-indigo-50 text-indigo-700 font-mono text-xs font-bold rounded-md">
-                  #{room.id}
-                </span>
-              </div>
-              <div className="flex items-center gap-3 text-xs text-slate-500 mt-0.5">
+              <h1 className="font-bold text-slate-900 text-sm sm:text-base truncate">
+                {room.title}
+              </h1>
+              <div className="flex items-center gap-2.5 text-xs text-slate-500 mt-0.5">
                 <span className="flex items-center gap-1">
                   <Users className="w-3.5 h-3.5 text-slate-400" />
-                  {room.userCount || 1}명 접속 중
+                  {room.userCount || 1}명 참여 중
                 </span>
-                <span className="flex items-center gap-1">
-                  <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
-                  {room.questions.length}개 질문
-                </span>
+                <span>•</span>
+                <button
+                  onClick={() => setIsEditingNick(true)}
+                  className="flex items-center gap-1 text-indigo-600 hover:underline font-medium"
+                >
+                  <User className="w-3.5 h-3.5" />
+                  <span>{currentNickname}</span>
+                </button>
               </div>
             </div>
           </div>
 
           {/* Quick Action Buttons */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 shrink-0">
             <button
               onClick={onOpenQR}
               className="p-2 text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"
@@ -138,22 +156,22 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
               onClick={() => setSortBy('popular')}
               className={`flex items-center gap-1 px-3 py-1.5 rounded-lg font-medium transition-all ${
                 sortBy === 'popular'
-                  ? 'bg-white text-indigo-600 shadow-sm'
+                  ? 'bg-white text-indigo-600 shadow-sm font-bold'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Flame className="w-3.5 h-3.5" />
+              <Flame className="w-3.5 h-3.5 text-amber-500" />
               인기순
             </button>
             <button
               onClick={() => setSortBy('latest')}
               className={`flex items-center gap-1 px-3 py-1.5 rounded-lg font-medium transition-all ${
                 sortBy === 'latest'
-                  ? 'bg-white text-indigo-600 shadow-sm'
+                  ? 'bg-white text-indigo-600 shadow-sm font-bold'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Clock className="w-3.5 h-3.5" />
+              <Clock className="w-3.5 h-3.5 text-indigo-500" />
               최신순
             </button>
           </div>
@@ -163,7 +181,7 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
               onClick={() => setFilterAnswered(!filterAnswered)}
               className={`px-2.5 py-1.5 rounded-lg font-medium transition-all text-[11px] ${
                 filterAnswered
-                  ? 'bg-indigo-50 text-indigo-700'
+                  ? 'bg-indigo-50 text-indigo-700 font-bold'
                   : 'bg-slate-200/60 text-slate-500'
               }`}
             >
@@ -173,12 +191,45 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
         </div>
       </header>
 
+      {/* Nickname Edit Modal */}
+      {isEditingNick && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <form onSubmit={handleSaveNick} className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl space-y-4">
+            <h3 className="font-bold text-slate-900 text-base">닉네임 변경</h3>
+            <input
+              type="text"
+              value={tempNick}
+              onChange={(e) => setTempNick(e.target.value)}
+              placeholder="새 닉네임 입력"
+              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm outline-none focus:border-indigo-600 focus:bg-white"
+              maxLength={15}
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsEditingNick(false)}
+                className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-100 rounded-xl"
+              >
+                취소
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-sm"
+              >
+                변경하기
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Main Question Feed */}
       <main className="max-w-2xl mx-auto w-full px-4 pt-4 flex-1">
         {room.isLocked && (
           <div className="mb-4 p-3.5 bg-amber-50 border border-amber-200 rounded-2xl flex items-center gap-3 text-amber-800 text-xs font-medium">
             <Lock className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>현재 강연자가 질문 접수를 일시 마감했습니다. 기존 질문에 공감은 가능합니다.</span>
+            <span>현재 강연자가 질문 접수를 일시 마감했습니다. 기존 질문에 공감 투표는 가능합니다.</span>
           </div>
         )}
 
@@ -189,7 +240,7 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
             </div>
             <h3 className="font-bold text-slate-800 text-base mb-1">아직 등록된 질문이 없습니다</h3>
             <p className="text-xs text-slate-500 max-w-xs mx-auto">
-              강연자에게 궁금한 점이나 의견을 가장 먼저 남겨보세요!
+              하단 입력창에서 강연자에게 첫 번째 질문을 남겨보세요!
             </p>
           </div>
         ) : (
@@ -218,14 +269,12 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
 
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
-                      {/* Content */}
                       <p className={`text-slate-800 text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words ${
                         q.isAnswered ? 'line-through text-slate-400' : 'font-medium'
                       }`}>
                         {q.content}
                       </p>
 
-                      {/* Author & Time */}
                       <div className="flex items-center gap-2 mt-3 text-xs text-slate-400 font-medium">
                         <span className="text-slate-600 font-semibold">{q.author}</span>
                         <span>•</span>
@@ -266,31 +315,22 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
       <footer className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 p-3 sm:p-4 shadow-xl">
         <div className="max-w-2xl mx-auto">
           <form onSubmit={handleSubmit} className="space-y-2">
-            {/* Author Settings (Collapsed/Inline) */}
             <div className="flex items-center justify-between text-xs text-slate-600 px-1">
-              <label className="flex items-center gap-1.5 cursor-pointer font-medium select-none">
+              <span className="text-slate-500">
+                작성자: <strong className="text-slate-800 font-bold">{isAnonymous ? '익명' : currentNickname}</strong>
+              </span>
+
+              <label className="flex items-center gap-1.5 cursor-pointer font-medium select-none text-indigo-600">
                 <input
                   type="checkbox"
                   checked={isAnonymous}
                   onChange={(e) => setIsAnonymous(e.target.checked)}
                   className="rounded text-indigo-600 focus:ring-indigo-500"
                 />
-                <span>익명으로 질문하기</span>
+                <span>익명으로 보내기</span>
               </label>
-
-              {!isAnonymous && (
-                <input
-                  type="text"
-                  value={author}
-                  onChange={(e) => setAuthor(e.target.value)}
-                  placeholder="닉네임 입력"
-                  className="px-2.5 py-1 bg-slate-100 border border-slate-200 rounded-lg text-xs outline-none focus:bg-white focus:border-indigo-500 w-32"
-                  maxLength={15}
-                />
-              )}
             </div>
 
-            {/* Input Box and Submit */}
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -316,7 +356,6 @@ export const AudienceView: React.FC<AudienceViewProps> = ({
   );
 };
 
-// 시간 포맷 헬퍼
 function formatTimeAgo(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
   if (seconds < 60) return '방금 전';

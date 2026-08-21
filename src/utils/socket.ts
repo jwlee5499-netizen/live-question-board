@@ -1,24 +1,27 @@
 import { io, Socket } from 'socket.io-client';
 
-// 브라우저 호스트와 포트 자동 감지
 const getServerUrl = () => {
   if (typeof window !== 'undefined') {
-    // Vite 개발 모드(포트 5173)일 때만 3001번 서버로 명시적 연결
     if (window.location.port === '5173') {
       return `http://${window.location.hostname}:3001`;
     }
-    // 터널링(trycloudflare.com, loca.lt) 또는 배포/동일 포트 서빙 시 현재 origin 사용
     return window.location.origin;
   }
   return 'http://localhost:3001';
 };
 
+// 실시간 연결 신뢰성 극대화 (웹소켓 + 폴링 자동 복구)
 export const socket: Socket = io(getServerUrl(), {
   autoConnect: true,
-  transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+  reconnectionDelay: 500,
+  reconnectionDelayMax: 2000,
+  timeout: 10000,
+  transports: ['polling', 'websocket'], // 모바일 통신사 호환성을 위해 polling 우선 후 ws 업그레이드
 });
 
-// 고유 사용자 ID 생성 및 캐싱 (중복 투표 방지용)
+// 고유 사용자 ID
 export const getUserId = (): string => {
   let uid = localStorage.getItem('qa_user_id');
   if (!uid) {
@@ -28,7 +31,16 @@ export const getUserId = (): string => {
   return uid;
 };
 
-// 사용자가 좋아요를 누른 질문 ID 목록 캐시
+// 닉네임 저장 및 가져오기
+export const getStoredNickname = (): string => {
+  return localStorage.getItem('qa_user_nickname') || '';
+};
+
+export const setStoredNickname = (name: string) => {
+  localStorage.setItem('qa_user_nickname', name);
+};
+
+// 투표 캐시
 export const getStoredVotes = (): Set<string> => {
   try {
     const raw = localStorage.getItem('qa_voted_questions');

@@ -27,6 +27,9 @@ const io = new Server(httpServer, {
     origin: '*',
     methods: ['GET', 'POST'],
   },
+  transports: ['polling', 'websocket'],
+  pingTimeout: 20000,
+  pingInterval: 10000,
 });
 
 // 로컬 IP 감지
@@ -52,6 +55,18 @@ app.get('/api/server-info', (req, res) => {
   });
 });
 
+// 가장 최근에 열린 강연방 가져오기 (링크만 치고 들어온 청중용)
+app.get('/api/active-room', (req, res) => {
+  const rooms = db.getAllRooms();
+  if (rooms.length > 0) {
+    const latest = rooms[0];
+    return res.json({ room: { id: latest.id, title: latest.title, isLocked: latest.isLocked } });
+  }
+  // 기본 방 하나 자동 생성
+  const defaultRoom = db.createRoom('MAIN', '실시간 강연 질문방');
+  res.json({ room: { id: defaultRoom.id, title: defaultRoom.title, isLocked: defaultRoom.isLocked } });
+});
+
 // 관리자 로그인 API
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body;
@@ -60,7 +75,6 @@ app.post('/api/admin/login', (req, res) => {
   }
 
   if (db.verifyAdminPassword(password)) {
-    // 세션 토큰 (간단 서명)
     const token = 'adm_' + Buffer.from(password + '_secret_' + Date.now()).toString('base64');
     return res.json({ success: true, token });
   } else {
@@ -133,9 +147,9 @@ app.get('/api/rooms/:roomId', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-  let currentRoomId = null;
+  let joinedRooms = new Set();
 
-  // 관리자: 방 생성
+  // 방 생성
   socket.on('create_room', ({ roomId, title, adminPassword }, callback) => {
     if (adminPassword && !db.verifyAdminPassword(adminPassword)) {
       if (callback) callback({ error: '관리자 권한이 없습니다.' });
@@ -148,23 +162,22 @@ io.on('connection', (socket) => {
     if (callback) callback({ success: true, room });
   });
 
-  // 방 입장 (청중 또는 관리자)
-  socket.on('join_room', ({ roomId, role = 'audience', adminPassword }, callback) => {
+  // 방 입장
+  socket.on('join_room', ({ roomId, role = 'audience' }, callback) => {
     const code = roomId?.toUpperCase();
     let room = db.getRoom(code);
 
     if (!room) {
-      // 방이 없는 경우 자동 생성 (기본)
       room = db.createRoom(code, `${code} 강연 세션`);
     }
 
-    currentRoomId = code;
     socket.join(code);
+    joinedRooms.add(code);
 
     const roomSockets = io.sockets.adapter.rooms.get(code);
     const userCount = roomSockets ? roomSockets.size : 1;
 
-    io.to(code).emit('user_count_updated', { userCount });
+    io.to(code).emit('user_count_updated', { roomId: code, userCount });
 
     if (callback) {
       callback({
@@ -180,7 +193,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 질문 등록 (청중)
+  // 질문 등록
   socket.on('new_question', ({ roomId, author, content }, callback) => {
     const code = roomId?.toUpperCase();
     const room = db.getRoom(code);
@@ -203,12 +216,14 @@ io.on('connection', (socket) => {
     const newQ = db.addQuestion(code, { author, content });
 
     if (newQ) {
+      console.log(`[Q&A Server] 새 질문 등록 (${code}): ${newQ.author} - ${newQ.content}`);
+      // 해당 룸 전체에 실시간 브로드캐스트
       io.to(code).emit('question_added', newQ);
       if (callback) callback({ success: true, question: newQ });
     }
   });
 
-  // 질문 추천(Upvote) 토글 (청중)
+  // 질문 추천(Upvote) 토글
   socket.on('vote_question', ({ roomId, questionId, userId }, callback) => {
     const code = roomId?.toUpperCase();
     const voterId = userId || socket.id;
@@ -264,11 +279,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    if (currentRoomId) {
-      const roomSockets = io.sockets.adapter.rooms.get(currentRoomId);
+    joinedRooms.forEach((code) => {
+      const roomSockets = io.sockets.adapter.rooms.get(code);
       const userCount = roomSockets ? roomSockets.size : 0;
-      io.to(currentRoomId).emit('user_count_updated', { userCount });
-    }
+      io.to(code).emit('user_count_updated', { roomId: code, userCount });
+    });
   });
 });
 

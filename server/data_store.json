@@ -1,0 +1,15 @@
+{
+  "adminConfig": {
+    "password": "admin1234"
+  },
+  "rooms": {
+    "XBSOL9": {
+      "id": "XBSOL9",
+      "title": "1",
+      "createdAt": 1787298973493,
+      "isLocked": false,
+      "isArchived": false,
+      "questions": []
+    }
+  }
+}
