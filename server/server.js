@@ -6,7 +6,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import localtunnel from 'localtunnel';
-import { startTunnel } from 'untun';
+import { db } from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,7 +17,7 @@ app.use(express.json());
 
 let publicTunnelUrl = process.env.PUBLIC_URL || null;
 
-// 정적 파일 서빙 (배포 및 빌드 실행 대응)
+// 정적 파일 서빙
 const distPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(distPath));
 
@@ -28,9 +28,6 @@ const io = new Server(httpServer, {
     methods: ['GET', 'POST'],
   },
 });
-
-// 메모리 저장소 (방 및 질문)
-const rooms = new Map();
 
 // 로컬 IP 감지
 function getLocalIpAddress() {
@@ -45,19 +42,85 @@ function getLocalIpAddress() {
   return 'localhost';
 }
 
+// 서버 정보
 app.get('/api/server-info', (req, res) => {
   res.json({
     ip: getLocalIpAddress(),
     port: 5173,
-    serverPort: 3001,
+    serverPort: process.env.PORT || 3001,
     publicUrl: publicTunnelUrl,
   });
 });
 
-// 룸 유효성 확인 API
+// 관리자 로그인 API
+app.post('/api/admin/login', (req, res) => {
+  const { password } = req.body;
+  if (!password) {
+    return res.status(400).json({ error: '비밀번호를 입력해주세요.' });
+  }
+
+  if (db.verifyAdminPassword(password)) {
+    // 세션 토큰 (간단 서명)
+    const token = 'adm_' + Buffer.from(password + '_secret_' + Date.now()).toString('base64');
+    return res.json({ success: true, token });
+  } else {
+    return res.status(401).json({ error: '관리자 비밀번호가 일치하지 않습니다.' });
+  }
+});
+
+// 관리자 비밀번호 변경 API
+app.post('/api/admin/change-password', (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!db.verifyAdminPassword(currentPassword)) {
+    return res.status(401).json({ error: '현재 비밀번호가 일치하지 않습니다.' });
+  }
+  if (!newPassword || newPassword.length < 4) {
+    return res.status(400).json({ error: '새 비밀번호는 4자리 이상이어야 합니다.' });
+  }
+
+  db.updateAdminPassword(newPassword);
+  res.json({ success: true, message: '비밀번호가 변경되었습니다.' });
+});
+
+// 관리자 전용: 세션 히스토리 목록 조회 API
+app.get('/api/admin/history', (req, res) => {
+  const rooms = db.getAllRooms().map((r) => ({
+    id: r.id,
+    title: r.title,
+    createdAt: r.createdAt,
+    questionCount: r.questions.length,
+    totalVotes: r.questions.reduce((sum, q) => sum + q.votes, 0),
+    answeredCount: r.questions.filter((q) => q.isAnswered).length,
+    isLocked: r.isLocked,
+  }));
+  res.json({ rooms });
+});
+
+// 관리자 전용: 특정 세션 상세 히스토리 조회 API
+app.get('/api/admin/history/:roomId', (req, res) => {
+  const { roomId } = req.params;
+  const room = db.getRoom(roomId);
+  if (!room) {
+    return res.status(404).json({ error: '세션을 찾을 수 없습니다.' });
+  }
+  res.json({ room });
+});
+
+// 관리자 전용: 세션 삭제 API
+app.delete('/api/admin/history/:roomId', (req, res) => {
+  const { roomId } = req.params;
+  const success = db.deleteRoom(roomId);
+  if (success) {
+    res.json({ success: true });
+  } else {
+    res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+  }
+});
+
+// 방 정보 확인 API
 app.get('/api/rooms/:roomId', (req, res) => {
   const { roomId } = req.params;
-  const room = rooms.get(roomId.toUpperCase());
+  const room = db.getRoom(roomId);
   if (!room) {
     return res.status(404).json({ error: 'Room not found' });
   }
@@ -72,43 +135,32 @@ app.get('/api/rooms/:roomId', (req, res) => {
 io.on('connection', (socket) => {
   let currentRoomId = null;
 
-  // 방 생성
-  socket.on('create_room', ({ roomId, title }, callback) => {
-    const code = (roomId || Math.random().toString(36).substring(2, 8)).toUpperCase();
-    if (!rooms.has(code)) {
-      rooms.set(code, {
-        id: code,
-        title: title || '실시간 강연 Q&A',
-        createdAt: Date.now(),
-        isLocked: false,
-        questions: [],
-      });
+  // 관리자: 방 생성
+  socket.on('create_room', ({ roomId, title, adminPassword }, callback) => {
+    if (adminPassword && !db.verifyAdminPassword(adminPassword)) {
+      if (callback) callback({ error: '관리자 권한이 없습니다.' });
+      return;
     }
-    const room = rooms.get(code);
+
+    const code = (roomId || Math.random().toString(36).substring(2, 8)).toUpperCase();
+    const room = db.createRoom(code, title);
+
     if (callback) callback({ success: true, room });
   });
 
-  // 방 입장
-  socket.on('join_room', ({ roomId, role = 'audience' }, callback) => {
+  // 방 입장 (청중 또는 관리자)
+  socket.on('join_room', ({ roomId, role = 'audience', adminPassword }, callback) => {
     const code = roomId?.toUpperCase();
-    let room = rooms.get(code);
+    let room = db.getRoom(code);
 
-    // 없는 방이면 기본 생성 (간편 테스트를 위해)
     if (!room) {
-      room = {
-        id: code,
-        title: `${code} 강연 세션`,
-        createdAt: Date.now(),
-        isLocked: false,
-        questions: [],
-      };
-      rooms.set(code, room);
+      // 방이 없는 경우 자동 생성 (기본)
+      room = db.createRoom(code, `${code} 강연 세션`);
     }
 
     currentRoomId = code;
     socket.join(code);
 
-    // 현재 접속자 수 계산 및 알림
     const roomSockets = io.sockets.adapter.rooms.get(code);
     const userCount = roomSockets ? roomSockets.size : 1;
 
@@ -128,10 +180,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 질문 등록
+  // 질문 등록 (청중)
   socket.on('new_question', ({ roomId, author, content }, callback) => {
     const code = roomId?.toUpperCase();
-    const room = rooms.get(code);
+    const room = db.getRoom(code);
 
     if (!room) {
       if (callback) callback({ error: '방을 찾을 수 없습니다.' });
@@ -148,115 +200,67 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const newQ = {
-      id: 'q_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-      roomId: code,
-      author: (author && author.trim()) ? author.trim() : '익명',
-      content: content.trim(),
-      votes: 0,
-      voters: [], // 중복 방지용 (socketId 또는 client uuid)
-      isAnswered: false,
-      isHighlighted: false,
-      isHidden: false,
-      createdAt: Date.now(),
-    };
+    const newQ = db.addQuestion(code, { author, content });
 
-    room.questions.unshift(newQ);
-
-    // 해당 방의 모든 클라이언트에 브로드캐스트
-    io.to(code).emit('question_added', newQ);
-
-    if (callback) callback({ success: true, question: newQ });
+    if (newQ) {
+      io.to(code).emit('question_added', newQ);
+      if (callback) callback({ success: true, question: newQ });
+    }
   });
 
-  // 질문 추천(Upvote) 토글
+  // 질문 추천(Upvote) 토글 (청중)
   socket.on('vote_question', ({ roomId, questionId, userId }, callback) => {
     const code = roomId?.toUpperCase();
-    const room = rooms.get(code);
-    if (!room) return;
-
-    const question = room.questions.find((q) => q.id === questionId);
-    if (!question) return;
-
     const voterId = userId || socket.id;
-    const voterIndex = question.voters.indexOf(voterId);
 
-    let hasVoted = false;
-    if (voterIndex === -1) {
-      // 투표 추가
-      question.voters.push(voterId);
-      question.votes += 1;
-      hasVoted = true;
-    } else {
-      // 투표 취소
-      question.voters.splice(voterIndex, 1);
-      question.votes = Math.max(0, question.votes - 1);
-      hasVoted = false;
+    const result = db.voteQuestion(code, questionId, voterId);
+    if (result) {
+      io.to(code).emit('question_updated', result.question);
+      if (callback) callback({ success: true, votes: result.question.votes, hasVoted: result.hasVoted });
     }
-
-    io.to(code).emit('question_updated', question);
-
-    if (callback) callback({ success: true, votes: question.votes, hasVoted });
   });
 
-  // 질문 상태 변경 (답변 완료 토글)
+  // 관리자: 답변 완료 토글
   socket.on('toggle_answered', ({ roomId, questionId }) => {
     const code = roomId?.toUpperCase();
-    const room = rooms.get(code);
-    if (!room) return;
-
-    const question = room.questions.find((q) => q.id === questionId);
+    const question = db.toggleAnswered(code, questionId);
     if (question) {
-      question.isAnswered = !question.isAnswered;
       io.to(code).emit('question_updated', question);
     }
   });
 
-  // 질문 강조(Highlight) 토글 - 발표자가 현재 답변 중인 질문 포커스
+  // 관리자: 질문 강조(Highlight) 토글
   socket.on('toggle_highlight', ({ roomId, questionId }) => {
     const code = roomId?.toUpperCase();
-    const room = rooms.get(code);
-    if (!room) return;
-
-    room.questions.forEach((q) => {
-      if (q.id === questionId) {
-        q.isHighlighted = !q.isHighlighted;
-      } else {
-        q.isHighlighted = false; // 하나만 강조
-      }
-    });
-
-    io.to(code).emit('room_questions_synced', room.questions);
+    const questions = db.toggleHighlight(code, questionId);
+    if (questions) {
+      io.to(code).emit('room_questions_synced', questions);
+    }
   });
 
-  // 질문 삭제
+  // 관리자: 질문 삭제
   socket.on('delete_question', ({ roomId, questionId }) => {
     const code = roomId?.toUpperCase();
-    const room = rooms.get(code);
-    if (!room) return;
-
-    room.questions = room.questions.filter((q) => q.id !== questionId);
-    io.to(code).emit('question_deleted', { questionId });
+    const success = db.deleteQuestion(code, questionId);
+    if (success) {
+      io.to(code).emit('question_deleted', { questionId });
+    }
   });
 
-  // 전체 질문 초기화
+  // 관리자: 전체 질문 초기화
   socket.on('clear_questions', ({ roomId }) => {
     const code = roomId?.toUpperCase();
-    const room = rooms.get(code);
-    if (!room) return;
-
-    room.questions = [];
+    db.clearQuestions(code);
     io.to(code).emit('room_questions_synced', []);
   });
 
-  // 질문 접수 잠금/해제 토글
+  // 관리자: 질문 접수 잠금/해제
   socket.on('toggle_lock', ({ roomId }) => {
     const code = roomId?.toUpperCase();
-    const room = rooms.get(code);
-    if (!room) return;
-
-    room.isLocked = !room.isLocked;
-    io.to(code).emit('room_lock_changed', { isLocked: room.isLocked });
+    const isLocked = db.toggleLock(code);
+    if (isLocked !== null) {
+      io.to(code).emit('room_lock_changed', { isLocked });
+    }
   });
 
   socket.on('disconnect', () => {
@@ -277,7 +281,6 @@ const PORT = process.env.PORT || 3001;
 httpServer.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`\n❌ [오류] 포트 ${PORT}번이 이미 다른 프로그램에서 사용 중입니다.`);
-    console.error(`👉 해결 방법: 기존에 켜져 있는 터미널이나 서버를 끄거나, 작업 관리자에서 node 프로세스를 종료해 주세요.\n`);
     process.exit(1);
   } else {
     console.error('서버 오류:', err);
@@ -289,26 +292,18 @@ httpServer.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n==================================================`);
   console.log(`> [Q&A Server] 로컬 접속:   http://localhost:${PORT}`);
   console.log(`> [Q&A Server] Wi-Fi 접속:   http://${localIp}:${PORT}`);
+  console.log(`> [Q&A Server] 기본 관리자 비밀번호: admin1234`);
 
-  // --tunnel 플래그가 있거나 환경변수로 터널 요청 시
   const enableTunnel = process.argv.includes('--tunnel') || process.env.ENABLE_TUNNEL === 'true';
   if (enableTunnel) {
     try {
       const subdomain = 'qa-' + Math.random().toString(36).substring(2, 8);
-      console.log(`> [Q&A Server] LTE 모바일 공개 터널 생성 중...`);
       const ltTunnel = await localtunnel({ port: PORT, subdomain });
       publicTunnelUrl = ltTunnel.url;
-      console.log(`> [Q&A Server] ✨ 외부 공개 주소 (스마트폰 접속용):`);
-      console.log(`> [Q&A Server] 🚀 ${publicTunnelUrl}`);
-      console.log(`==================================================\n`);
-
-      ltTunnel.on('close', () => {
-        console.log('> [Q&A Server] Tunnel closed');
-      });
+      console.log(`> [Q&A Server] ✨ 외부 공개 주소 (스마트폰 접속용): ${publicTunnelUrl}`);
     } catch (err) {
       console.error('> [Q&A Server] 터널 생성 실패:', err.message);
     }
-  } else {
-    console.log(`==================================================\n`);
   }
+  console.log(`==================================================\n`);
 });

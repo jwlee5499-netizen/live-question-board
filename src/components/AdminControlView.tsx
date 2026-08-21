@@ -12,7 +12,8 @@ import {
   ArrowLeft, 
   Sparkles,
   Search,
-  Check
+  Check,
+  History
 } from 'lucide-react';
 
 interface AdminControlViewProps {
@@ -25,6 +26,7 @@ interface AdminControlViewProps {
   onToggleLock: () => void;
   onClearQuestions: () => void;
   onOpenQR: () => void;
+  onOpenHistory?: () => void;
   onChangeMode: (mode: 'audience' | 'screen') => void;
   onLeave: () => void;
 }
@@ -39,6 +41,7 @@ export const AdminControlView: React.FC<AdminControlViewProps> = ({
   onToggleLock,
   onClearQuestions,
   onOpenQR,
+  onOpenHistory,
   onChangeMode,
   onLeave,
 }) => {
@@ -87,6 +90,16 @@ export const AdminControlView: React.FC<AdminControlViewProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {onOpenHistory && (
+              <button
+                onClick={onOpenHistory}
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors"
+                title="지난 강연 히스토리"
+              >
+                <History className="w-4 h-4 text-indigo-600" />
+                <span>히스토리</span>
+              </button>
+            )}
             <button
               onClick={onOpenQR}
               className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors"

@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { socket, getUserId, getStoredVotes, saveStoredVote } from './utils/socket';
 import { Question, RoomInfo, ViewMode } from './types';
 import { CreateJoinRoom } from './components/CreateJoinRoom';
 import { AudienceView } from './components/AudienceView';
 import { PresenterScreenView } from './components/PresenterScreenView';
 import { AdminControlView } from './components/AdminControlView';
+import { RoomHistoryView } from './components/RoomHistoryView';
 import { QRCodeModal } from './components/QRCodeModal';
 
 export function App() {
@@ -13,6 +14,9 @@ export function App() {
   const [serverIp, setServerIp] = useState<string>('localhost');
   const [publicUrl, setPublicUrl] = useState<string | null>(() => {
     return localStorage.getItem('qa_custom_public_url') || null;
+  });
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
+    return !!localStorage.getItem('qa_admin_token');
   });
   const [votedIds, setVotedIds] = useState<Set<string>>(new Set());
   const [isQrOpen, setIsQrOpen] = useState(false);
@@ -33,17 +37,6 @@ export function App() {
     setVotedIds(getStoredVotes());
   }, []);
 
-  const handleUpdateCustomUrl = (url: string) => {
-    const trimmed = url.trim();
-    if (trimmed) {
-      localStorage.setItem('qa_custom_public_url', trimmed);
-      setPublicUrl(trimmed);
-    } else {
-      localStorage.removeItem('qa_custom_public_url');
-      setPublicUrl(null);
-    }
-  };
-
   // 2. URL 쿼리 파라미터로 자동 입장 처리 (?room=CODE&mode=audience)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -57,11 +50,9 @@ export function App() {
 
   // 3. Socket 이벤트 등록
   useEffect(() => {
-    // 새 질문 추가
     socket.on('question_added', (newQ: Question) => {
       setRoom((prev) => {
         if (!prev) return prev;
-        // 중복 방지
         if (prev.questions.some((q) => q.id === newQ.id)) return prev;
         return {
           ...prev,
@@ -70,7 +61,6 @@ export function App() {
       });
     });
 
-    // 질문 업데이트 (좋아요 수, 완료 상태 등)
     socket.on('question_updated', (updatedQ: Question) => {
       setRoom((prev) => {
         if (!prev) return prev;
@@ -81,7 +71,6 @@ export function App() {
       });
     });
 
-    // 질문 삭제
     socket.on('question_deleted', ({ questionId }: { questionId: string }) => {
       setRoom((prev) => {
         if (!prev) return prev;
@@ -92,17 +81,14 @@ export function App() {
       });
     });
 
-    // 질문 목록 전체 동기화
     socket.on('room_questions_synced', (questions: Question[]) => {
       setRoom((prev) => (prev ? { ...prev, questions } : prev));
     });
 
-    // 접속자 수 업데이트
     socket.on('user_count_updated', ({ userCount }: { userCount: number }) => {
       setRoom((prev) => (prev ? { ...prev, userCount } : prev));
     });
 
-    // 질문 접수 마감/오픈 상태
     socket.on('room_lock_changed', ({ isLocked }: { isLocked: boolean }) => {
       setRoom((prev) => (prev ? { ...prev, isLocked } : prev));
     });
@@ -116,6 +102,44 @@ export function App() {
       socket.off('room_lock_changed');
     };
   }, []);
+
+  // 관리자 로그인 핸들러
+  const handleAdminLogin = async (password: string): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json();
+      if (data.success && data.token) {
+        localStorage.setItem('qa_admin_token', data.token);
+        setIsAdmin(true);
+        return true;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return false;
+  };
+
+  // 관리자 로그아웃
+  const handleAdminLogout = () => {
+    localStorage.removeItem('qa_admin_token');
+    setIsAdmin(false);
+  };
+
+  // 접속 URL 커스텀 설정
+  const handleUpdateCustomUrl = (url: string) => {
+    const trimmed = url.trim();
+    if (trimmed) {
+      localStorage.setItem('qa_custom_public_url', trimmed);
+      setPublicUrl(trimmed);
+    } else {
+      localStorage.removeItem('qa_custom_public_url');
+      setPublicUrl(null);
+    }
+  };
 
   // 방 입장 핸들러
   const handleJoin = (roomId: string, mode: ViewMode = 'audience', title?: string) => {
@@ -134,14 +158,13 @@ export function App() {
         setRoom(response.room);
         setViewMode(mode);
 
-        // URL 히스토리 업데이트 (새로고침 시 방 유지)
         const newUrl = `${window.location.pathname}?room=${roomId}&mode=${mode}`;
         window.history.replaceState({}, '', newUrl);
       }
     });
   };
 
-  // 질문 등록
+  // 질문 등록 (청중)
   const handleSendQuestion = (author: string, content: string) => {
     if (!room) return;
     socket.emit('new_question', {
@@ -151,7 +174,7 @@ export function App() {
     });
   };
 
-  // 공감(좋아요) 토글
+  // 공감 투표
   const handleVote = (questionId: string) => {
     if (!room) return;
     socket.emit(
@@ -170,37 +193,33 @@ export function App() {
     );
   };
 
-  // 진행자: 질문 강조(포커스) 토글
+  // 관리자 기능들
   const handleToggleHighlight = (questionId: string) => {
     if (!room) return;
     socket.emit('toggle_highlight', { roomId: room.id, questionId });
   };
 
-  // 진행자: 답변 완료 토글
   const handleToggleAnswered = (questionId: string) => {
     if (!room) return;
     socket.emit('toggle_answered', { roomId: room.id, questionId });
   };
 
-  // 진행자: 질문 삭제
   const handleDeleteQuestion = (questionId: string) => {
     if (!room) return;
     socket.emit('delete_question', { roomId: room.id, questionId });
   };
 
-  // 진행자: 질문 접수 잠금 토글
   const handleToggleLock = () => {
     if (!room) return;
     socket.emit('toggle_lock', { roomId: room.id });
   };
 
-  // 진행자: 전체 질문 비우기
   const handleClearQuestions = () => {
     if (!room) return;
     socket.emit('clear_questions', { roomId: room.id });
   };
 
-  // 모드 변경 (스크린, 관리자, 청중)
+  // 뷰 모드 변경
   const handleChangeMode = (mode: ViewMode) => {
     setViewMode(mode);
     if (room) {
@@ -218,9 +237,20 @@ export function App() {
 
   return (
     <div>
-      {viewMode === 'join' || !room ? (
-        <CreateJoinRoom onJoin={handleJoin} />
-      ) : viewMode === 'audience' ? (
+      {viewMode === 'join' || (!room && viewMode !== 'history') ? (
+        <CreateJoinRoom
+          isAdmin={isAdmin}
+          onAdminLogin={handleAdminLogin}
+          onAdminLogout={handleAdminLogout}
+          onJoin={handleJoin}
+          onOpenHistory={() => setViewMode('history')}
+        />
+      ) : viewMode === 'history' ? (
+        <RoomHistoryView
+          onBack={() => setViewMode('join')}
+          onOpenRoom={(roomId, mode) => handleJoin(roomId, mode)}
+        />
+      ) : room && viewMode === 'audience' ? (
         <AudienceView
           room={room}
           userId={userId}
@@ -231,7 +261,7 @@ export function App() {
           onChangeMode={(mode) => handleChangeMode(mode)}
           onLeave={handleLeave}
         />
-      ) : viewMode === 'screen' ? (
+      ) : room && viewMode === 'screen' ? (
         <PresenterScreenView
           room={room}
           serverIp={serverIp}
@@ -241,7 +271,7 @@ export function App() {
           onChangeMode={(mode) => handleChangeMode(mode)}
           onLeave={handleLeave}
         />
-      ) : (
+      ) : room ? (
         <AdminControlView
           room={room}
           publicUrl={publicUrl}
@@ -252,12 +282,13 @@ export function App() {
           onToggleLock={handleToggleLock}
           onClearQuestions={handleClearQuestions}
           onOpenQR={() => setIsQrOpen(true)}
+          onOpenHistory={() => setViewMode('history')}
           onChangeMode={(mode) => handleChangeMode(mode)}
           onLeave={handleLeave}
         />
-      )}
+      ) : null}
 
-      {/* QR Code Global Modal */}
+      {/* QR Code Modal */}
       {room && (
         <QRCodeModal
           isOpen={isQrOpen}

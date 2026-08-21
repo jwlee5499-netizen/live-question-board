@@ -19,4 +19,14 @@ export interface RoomInfo {
   userCount: number;
 }
 
-export type ViewMode = 'join' | 'audience' | 'screen' | 'admin';
+export interface RoomHistoryItem {
+  id: string;
+  title: string;
+  createdAt: number;
+  questionCount: number;
+  totalVotes: number;
+  answeredCount: number;
+  isLocked: boolean;
+}
+
+export type ViewMode = 'join' | 'audience' | 'screen' | 'admin' | 'history';
